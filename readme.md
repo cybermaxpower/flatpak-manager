@@ -1,4 +1,4 @@
-"# Flatpak Manager
+# Flatpak Manager
 
 Flatpak Manager is a lightweight, Zenity-based graphical utility designed to inspect, install, update, and manage Flatpak applications on Linux systems. 
 
