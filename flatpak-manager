@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+
+# Title: Flatpak Manager
+# Version: 1.0.0
+# Description: Graphical package inspector and manager for Flatpaks built with Zenity.
+# Inspects package files (.flatpakref / .flatpak) before installing,
+# and provides a menu for managing installed apps, updates, and removals.
+
+
+# SECTION: Dependency Check
+# Verifies that both flatpak and zenity are installed before proceeding.
+check_dependencies() {
+    if ! command -v flatpak &> /dev/null; then
+        zenity --error --text="Flatpak is not installed on this system."
+        exit 1
+    fi
+
+    if ! command -v zenity &> /dev/null; then
+        echo "Error: Zenity is not installed on this system."
+        exit 1
+    fi
+}
+
+
+# SECTION: Package Inspection
+# Reads metadata from .flatpakref files or App IDs to show app details
+# before asking the user if they want to install or reinstall.
+inspect_file() {
+    local target="$1"
+    local app_name=""
+    local app_id=""
+    local branch=""
+    local runtime=""
+    local url=""
+
+    if [[ "$target" == *.flatpakref ]]; then
+        app_name=$(grep -i "^Name=" "$target" | cut -d'=' -f2 | head -n1)
+        app_id=$(grep -i "^Application=" "$target" | cut -d'=' -f2 | head -n1)
+        branch=$(grep -i "^Branch=" "$target" | cut -d'=' -f2 | head -n1)
+        runtime=$(grep -i "^Runtime=" "$target" | cut -d'=' -f2 | head -n1)
+        url=$(grep -i "^Url=" "$target" | cut -d'=' -f2 | head -n1)
+    else
+        app_id="$target"
+    fi
+
+    if [[ -z "$app_name" ]]; then
+        app_name="$app_id"
+    fi
+
+    local is_installed="No"
+    if flatpak list --app | grep -q "$app_id"; then
+        is_installed="Yes"
+    fi
+
+    local info_text="Package Inspection Details\n\n"
+    info_text+="Application Name: $app_name\n"
+    info_text+="Application ID: $app_id\n"
+    if [[ -n "$branch" ]]; then info_text+="Branch: $branch\n"; fi
+    if [[ -n "$runtime" ]]; then info_text+="Required Runtime: $runtime\n"; fi
+    if [[ -n "$url" ]]; then info_text+="Source URL: $url\n"; fi
+    info_text+="Currently Installed: $is_installed\n\n"
+
+    if [[ "$is_installed" == "Yes" ]]; then
+        info_text+="This package is already installed. Do you want to reinstall or update it?"
+    else
+        info_text+="Do you want to proceed with installing this package?"
+    fi
+
+    if zenity --question \
+        --title="Flatpak Manager" \
+        --text="$info_text" \
+        --width=480 \
+        --height=320; then
+        
+        execute_install "$target"
+    fi
+}
+
+
+# SECTION: Installation Execution
+# Runs the actual flatpak install command and displays an animated progress bar.
+execute_install() {
+    local target="$1"
+
+    (
+        flatpak install -y "$target"
+    ) | zenity --progress \
+        --title="Flatpak Manager" \
+        --text="Resolving dependencies and installing package..." \
+        --pulsate \
+        --auto-close \
+        --auto-kill
+
+    if [[ $? -eq 0 ]]; then
+        zenity --info --title="Flatpak Manager" --text="Package installation completed successfully."
+    else
+        zenity --error --title="Flatpak Manager" --text="Installation was cancelled or encountered an error."
+    fi
+}
+
+
+# SECTION: File Selection Dialog
+# Opens a file browser window to choose a downloaded .flatpakref or .flatpak file.
+open_file_dialog() {
+    file_target=$(zenity --file-selection \
+        --title="Flatpak Manager - Select Package File" \
+        --file-filter="Flatpak Files (*.flatpakref *.flatpak) | *.flatpakref *.flatpak" \
+        --file-filter="All Files | *")
+
+    if [[ -n "$file_target" ]]; then
+        inspect_file "$file_target"
+    fi
+}
+
+
+# SECTION: App ID Search Dialog
+# Opens a text box for manual input of a Flatpak App ID or search term.
+open_id_dialog() {
+    app_target=$(zenity --entry \
+        --title="Flatpak Manager - Search App ID" \
+        --text="Enter Flatpak App ID or search term (e.g. org.gimp.GIMP):" \
+        --width=400)
+
+    if [[ -n "$app_target" ]]; then
+        inspect_file "$app_target"
+    fi
+}
+
+
+# SECTION: Package Uninstaller
+# Lists installed Flatpak applications, allows selection for removal,
+# and offers optional cleanup of unused runtimes.
+uninstall_flatpak() {
+    app_data=$(flatpak list --app --columns=application,name | tr '\t' '\n')
+
+    if [[ -z "$app_data" ]]; then
+        zenity --info --title="Flatpak Manager" --text="No Flatpak applications are currently installed."
+        return
+    fi
+
+    app_id=$(echo "$app_data" | zenity --list \
+        --title="Flatpak Manager - Uninstall" \
+        --text="Select an application to uninstall:" \
+        --column="Application ID" \
+        --column="Name" \
+        --width=500 \
+        --height=400)
+
+    if [[ -z "$app_id" ]]; then
+        return
+    fi
+
+    (
+        flatpak uninstall -y "$app_id"
+    ) | zenity --progress \
+        --title="Flatpak Manager" \
+        --text="Removing $app_id..." \
+        --pulsate \
+        --auto-close \
+        --auto-kill
+
+    if zenity --question --title="Flatpak Manager" --text="Would you like to remove unused runtime dependencies as well?"; then
+        (
+            flatpak uninstall --unused -y
+        ) | zenity --progress \
+            --title="Flatpak Manager" \
+            --text="Removing unused runtimes..." \
+            --pulsate \
+            --auto-close \
+            --auto-kill
+    fi
+
+    zenity --info --title="Flatpak Manager" --text="Uninstallation process completed."
+}
+
+
+# SECTION: Update Manager
+# Checks for available upgrades across installed Flatpaks and runtimes,
+# showing a list before applying updates.
+update_flatpaks() {
+    updates=$(flatpak remote-ls --updates --columns=application,name 2>/dev/null | tr '\t' '\n')
+
+    if [[ -z "$updates" ]]; then
+        zenity --info --title="Flatpak Manager" --text="All Flatpak applications and runtimes are up to date."
+        return
+    fi
+
+    if echo "$updates" | zenity --list \
+        --title="Flatpak Manager - Updates Available" \
+        --text="The following updates are available. Click OK to install them:" \
+        --column="Application ID" \
+        --column="Name" \
+        --width=500 \
+        --height=350; then
+
+        (
+            flatpak update -y
+        ) | zenity --progress \
+            --title="Flatpak Manager" \
+            --text="Downloading and applying updates..." \
+            --pulsate \
+            --auto-close \
+            --auto-kill
+
+        if [[ $? -eq 0 ]]; then
+            zenity --info --title="Flatpak Manager" --text="All Flatpak updates completed successfully."
+        else
+            zenity --error --title="Flatpak Manager" --text="Update process was cancelled or failed."
+        fi
+    fi
+}
+
+
+# SECTION: Installed Packages List
+# Displays a simple list window showing all currently installed Flatpak applications.
+list_flatpaks() {
+    app_data=$(flatpak list --app --columns=application,name | tr '\t' '\n')
+
+    if [[ -z "$app_data" ]]; then
+        zenity --info --title="Flatpak Manager" --text="No Flatpak applications installed."
+        return
+    fi
+
+    echo "$app_data" | zenity --list \
+        --title="Flatpak Manager - Installed Applications" \
+        --text="Currently installed Flatpak applications:" \
+        --column="Application ID" \
+        --column="Name" \
+        --width=500 \
+        --height=400
+}
+
+
+# SECTION: Main Controller and Menu Loop
+# Routes directly to package inspection if passed a file argument from Nemo,
+# or displays the main menu loop if launched standalone.
+main() {
+    check_dependencies
+
+    if [[ -n "$1" ]]; then
+        inspect_file "$1"
+        exit 0
+    fi
+
+    while true; do
+        choice=$(zenity --list \
+            --title="Flatpak Manager" \
+            --text="Select an action:" \
+            --column="ID" \
+            --column="Option" \
+            "1" "Open Downloaded Package File (.flatpakref / .flatpak)" \
+            "2" "Install Package by App ID or Name" \
+            "3" "Uninstall Installed Package" \
+            "4" "Check for Package Updates" \
+            "5" "List Installed Packages" \
+            "6" "Exit" \
+            --hide-column=1 \
+            --width=450 \
+            --height=350)
+
+        case "$choice" in
+            1) open_file_dialog ;;
+            2) open_id_dialog ;;
+            3) uninstall_flatpak ;;
+            4) update_flatpaks ;;
+            5) list_flatpaks ;;
+            6|"") break ;;
+        esac
+    done
+}
+
+main "$1"
